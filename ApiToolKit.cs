@@ -128,8 +128,8 @@ namespace ApiToolkit.Net
           rawUrl,
           msg_id,
           urlPath,
-          requestBody,
-          responseBody,
+          _client.Config.CaptureRequestBody ? requestBody : "",
+          _client.Config.CaptureResponseBody ? responseBody : "",
           errors,
           _client.Config,
           "DotNet");
