@@ -5,6 +5,10 @@ VisualStudioVersion = 17.5.002.0
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "apitoolkit-dotnet", "apitoolkit-dotnet.csproj", "{F869FF96-3574-44A6-9ABE-2261D0119CDE}"
 EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{C0FB5995-8DC0-4218-BF95-384B120F09A4}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ApiToolkit.Net.Tests", "tests\ApiToolkit.Net.Tests\ApiToolkit.Net.Tests.csproj", "{64B687FA-2D59-464E-9322-252129E55AE5}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -15,11 +19,18 @@ Global
 		{F869FF96-3574-44A6-9ABE-2261D0119CDE}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{F869FF96-3574-44A6-9ABE-2261D0119CDE}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{F869FF96-3574-44A6-9ABE-2261D0119CDE}.Release|Any CPU.Build.0 = Release|Any CPU
+		{64B687FA-2D59-464E-9322-252129E55AE5}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{64B687FA-2D59-464E-9322-252129E55AE5}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{64B687FA-2D59-464E-9322-252129E55AE5}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{64B687FA-2D59-464E-9322-252129E55AE5}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
 	EndGlobalSection
 	GlobalSection(ExtensibilityGlobals) = postSolution
 		SolutionGuid = {80A94D82-2355-4EB5-93B9-5DB94457E1F9}
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{64B687FA-2D59-464E-9322-252129E55AE5} = {C0FB5995-8DC0-4218-BF95-384B120F09A4}
 	EndGlobalSection
 EndGlobal

@@ -23,8 +23,8 @@ jobs:
             7.0.x
             8.0.x
       - name: Restore dependencies
-        run: dotnet restore
+        run: dotnet restore apitoolkit-dotnet.sln
       - name: Build
-        run: dotnet build --no-restore
+        run: dotnet build apitoolkit-dotnet.sln --no-restore
       - name: Test
-        run: dotnet test --no-build --verbosity normal
+        run: dotnet test apitoolkit-dotnet.sln --no-build --verbosity normal

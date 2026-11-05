@@ -4,6 +4,7 @@ using Newtonsoft.Json.Linq;
 using Microsoft.AspNetCore.Routing;
 using Newtonsoft.Json;
 using System.Diagnostics;
+using System.Net.Http.Headers;
 using static System.Web.HttpUtility;
 
 namespace ApiToolkit.Net
@@ -198,10 +199,10 @@ namespace ApiToolkit.Net
         span.SetTag("net.host.name", host);
         span.SetTag("apitoolkit.msg_id", msgId);
         span.SetTag("http.route", urlPath);
-        span.SetTag("http.target", rawUrl);
+        span.SetTag("http.target", RedactQueryString(rawUrl, config.RedactHeaders));
         span.SetTag("http.request.method", method);
         span.SetTag("http.response.status_code", statusCode);
-        span.SetTag("http.request.query_params", JsonConvert.SerializeObject(queryParams));
+        span.SetTag("http.request.query_params", JsonConvert.SerializeObject(RedactQueryParams(queryParams, config.RedactHeaders)));
         span.SetTag("http.request.path_params", JsonConvert.SerializeObject(pathParams));
         span.SetTag("apitoolkit.sdk_type", sdkType);
         span.SetTag("apitoolkit.parent_id", parentId ?? "");
@@ -270,13 +271,39 @@ namespace ApiToolkit.Net
       return System.Text.Encoding.UTF8.GetBytes(json.ToString());
     }
 
+    const string Redacted = "[CLIENT_REDACTED]";
+
     // Always redacted, in addition to Config.RedactHeaders
     public static readonly string[] DefaultRedactHeaders = ["authorization", "cookie", "set-cookie", "proxy-authorization", "x-api-key"];
+    public static readonly string[] DefaultRedactQueryParams = ["api_key", "apikey", "access_token", "token", "password", "secret", "client_secret", "signature", "sig", "auth"];
+
+    static HashSet<string> RedactSet(string[] defaults, List<string> redactList) =>
+      new(defaults.Concat(redactList ?? []), StringComparer.OrdinalIgnoreCase);
 
     public static Dictionary<string, List<string>> RedactHeaders(Dictionary<string, List<string>> headers, List<string> redactList)
     {
-      var redact = new HashSet<string>(DefaultRedactHeaders.Concat(redactList ?? []), StringComparer.OrdinalIgnoreCase);
-      return headers.ToDictionary(kvp => kvp.Key, kvp => redact.Contains(kvp.Key) ? ["[CLIENT_REDACTED]"] : kvp.Value);
+      var redact = RedactSet(DefaultRedactHeaders, redactList);
+      return headers.ToDictionary(kvp => kvp.Key, kvp => redact.Contains(kvp.Key) ? [Redacted] : kvp.Value);
+    }
+
+    public static Dictionary<string, string> RedactQueryParams(Dictionary<string, string> query, List<string> redactList)
+    {
+      var redact = RedactSet(DefaultRedactQueryParams, redactList);
+      return query?.ToDictionary(kv => kv.Key, kv => redact.Contains(kv.Key) ? Redacted : kv.Value);
+    }
+
+    // Rewrites only the matching values, so the rest of the URL stays exactly as sent
+    public static string RedactQueryString(string url, List<string> redactList)
+    {
+      var q = url?.IndexOf('?') ?? -1;
+      if (q < 0) return url;
+      var redact = RedactSet(DefaultRedactQueryParams, redactList);
+      var pairs = url[(q + 1)..].Split('&').Select(p =>
+      {
+        var eq = p.IndexOf('=');
+        return eq >= 0 && redact.Contains(UrlDecode(p[..eq])) ? p[..(eq + 1)] + Uri.EscapeDataString(Redacted) : p;
+      });
+      return url[..(q + 1)] + string.Join("&", pairs);
     }
   }
 
@@ -333,7 +360,7 @@ namespace ApiToolkit.Net
 
     public ObservingHandler(HttpContext? httpContext = null, ATOptions? options = null) : base(new HttpClientHandler())
     {
-      _context = httpContext ?? throw new ArgumentNullException(nameof(httpContext));
+      _context = httpContext;
       _options = new Config { RedactHeaders = new List<string> { }, RedactRequestBody = new List<string> { }, RedactResponseBody = new List<string> { } };
       if (options != null)
       {
@@ -356,7 +383,7 @@ namespace ApiToolkit.Net
     {
 
       using var span = RegisteredActivity.StartActivity("apitoolkit-http-span");
-      var reqHeaders = request.Headers.ToDictionary(h => h.Key, h => h.Value.ToList());
+      var reqHeaders = AllHeaders(request.Headers, request.Content);
       var reqBody = "";
       if (request != null && request.Content != null)
       {
@@ -389,7 +416,7 @@ namespace ApiToolkit.Net
       var RequestUri = request.RequestUri;
       try
       {
-        var respHeaders = response?.Headers.ToDictionary(h => h.Key, h => h.Value.ToList()) ?? new();
+        var respHeaders = response == null ? new() : AllHeaders(response.Headers, response.Content);
         var respBody = response == null ? "" : await response.Content.ReadAsStringAsync();
         var queryDictCol = ParseQueryString(RequestUri?.Query ?? "");
 
@@ -425,6 +452,11 @@ namespace ApiToolkit.Net
       }
       catch (Exception) { }
     }
+    // Content-Type, Content-Length and friends live on the content, not the message
+    static Dictionary<string, List<string>> AllHeaders(HttpHeaders headers, HttpContent content) =>
+      headers.Concat((IEnumerable<KeyValuePair<string, IEnumerable<string>>>)content?.Headers ?? [])
+        .GroupBy(h => h.Key).ToDictionary(g => g.Key, g => g.SelectMany(h => h.Value).ToList());
+
     static Dictionary<string, string?> ParsePathPattern(string pattern, string url)
     {
       var result = new Dictionary<string, string?>();

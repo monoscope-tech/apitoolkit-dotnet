@@ -115,6 +115,65 @@ public class RedactTests
     Assert.That(span.GetTagItem("http.request.header.Accept"), Is.EqualTo("*/*"));
   }
 
+  [Test]
+  public void TestSetAttributesRedactsQueryParams()
+  {
+    using var span = new Activity("test").Start();
+    var query = new Dictionary<string, string> { { "api_key", "k" }, { "Token", "t" }, { "x", "1" }, { "X-Secret", "s" } };
+    var config = new Config { RedactHeaders = new List<string> { "x-secret" } };
+    Client.SetAttributes(span, "example.com", 200, query, new(), new(), new(), "GET", "/u?api_key=k&Token=t&x=1&X-Secret=s&sig", "id", "/u", "", "", new(), config, "test");
+
+    Assert.That(span.GetTagItem("http.target"), Is.EqualTo("/u?api_key=%5BCLIENT_REDACTED%5D&Token=%5BCLIENT_REDACTED%5D&x=1&X-Secret=%5BCLIENT_REDACTED%5D&sig"));
+    Assert.That(span.GetTagItem("http.request.query_params"),
+      Is.EqualTo("{\"api_key\":\"[CLIENT_REDACTED]\",\"Token\":\"[CLIENT_REDACTED]\",\"x\":\"1\",\"X-Secret\":\"[CLIENT_REDACTED]\"}"));
+  }
+
+  class OkHandler : HttpMessageHandler
+  {
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage r, CancellationToken c) =>
+      Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.OK) { Content = new StringContent("{}", Encoding.UTF8, "application/json") });
+  }
+
+  static ActivityListener Capture(Action<Activity> onStop)
+  {
+    var listener = new ActivityListener
+    {
+      ShouldListenTo = s => s.Name == "APItoolkit.HTTPInstrumentation",
+      Sample = (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.AllDataAndRecorded,
+      ActivityStopped = onStop
+    };
+    ActivitySource.AddActivityListener(listener);
+    return listener;
+  }
+
+  [Test]
+  public async Task TestObservingHandlerWithoutContext()
+  {
+    Activity captured = null;
+    using var listener = Capture(a => captured = a);
+    var handler = new Client(new Config()).APIToolkitObservingHandler();
+    handler.InnerHandler = new OkHandler();
+    using var http = new HttpClient(handler);
+
+    await http.GetAsync("http://api.example.com/users");
+
+    Assert.That(captured.GetTagItem("http.response.status_code"), Is.EqualTo(200));
+    Assert.That(captured.GetTagItem("apitoolkit.parent_id"), Is.EqualTo(""));
+  }
+
+  [Test]
+  public async Task TestObservingHandlerRecordsContentHeaders()
+  {
+    Activity captured = null;
+    using var listener = Capture(a => captured = a);
+    using var http = new HttpClient(new ObservingHandler(new DefaultHttpContext()) { InnerHandler = new OkHandler() });
+
+    await http.PostAsync("http://api.example.com/users", new StringContent("{}", Encoding.UTF8, "text/plain"));
+
+    Assert.That(captured.GetTagItem("http.request.header.Content-Type"), Is.EqualTo("text/plain; charset=utf-8"));
+    Assert.That(captured.GetTagItem("http.response.header.Content-Type"), Is.EqualTo("application/json; charset=utf-8"));
+  }
+
   class ThrowingHandler : HttpMessageHandler
   {
     protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage r, CancellationToken c) => throw new HttpRequestException("connection refused");
@@ -124,15 +183,9 @@ public class RedactTests
   public async Task TestObservingHandlerRecordsFailedRequests()
   {
     Activity captured = null;
-    using var listener = new ActivityListener
-    {
-      ShouldListenTo = s => s.Name == "APItoolkit.HTTPInstrumentation",
-      Sample = (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.AllDataAndRecorded,
-      ActivityStopped = a => captured = a
-    };
-    ActivitySource.AddActivityListener(listener);
+    using var listener = Capture(a => captured = a);
     using var http = new HttpClient(new ObservingHandler(new DefaultHttpContext()) { InnerHandler = new ThrowingHandler() });
-    var req = new HttpRequestMessage(HttpMethod.Post, "http://api.example.com/users?x=1") { Content = new StringContent("{\"a\":1}") };
+    var req = new HttpRequestMessage(HttpMethod.Post, "http://api.example.com/users?x=1&api_key=k") { Content = new StringContent("{\"a\":1}") };
     req.Headers.Add("Authorization", "Bearer abc");
 
     Assert.ThrowsAsync<HttpRequestException>(() => http.SendAsync(req));
@@ -141,6 +194,8 @@ public class RedactTests
     Assert.That(captured.GetTagItem("http.request.method"), Is.EqualTo("POST"));
     Assert.That(captured.GetTagItem("net.host.name"), Is.EqualTo("api.example.com"));
     Assert.That(captured.GetTagItem("http.route"), Is.EqualTo("/users"));
+    Assert.That(captured.GetTagItem("http.target"), Is.EqualTo("/users?x=1&api_key=%5BCLIENT_REDACTED%5D"));
+    Assert.That(captured.GetTagItem("http.request.query_params"), Is.EqualTo("{\"x\":\"1\",\"api_key\":\"[CLIENT_REDACTED]\"}"));
     Assert.That(captured.GetTagItem("http.request.body"), Is.EqualTo(Convert.ToBase64String(Encoding.UTF8.GetBytes("{\"a\":1}"))));
     Assert.That(captured.GetTagItem("http.request.header.Authorization"), Is.EqualTo("[CLIENT_REDACTED]"));
     Assert.That((string)captured.GetTagItem("apitoolkit.errors"), Does.Contain("connection refused"));

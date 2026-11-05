@@ -19,18 +19,16 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Remove="tests/**" />
+    <None Remove="tests/**" />
     <None Include="README.md" Pack="true" PackagePath="\" />
     <PackageReference Include="Microsoft.AspNetCore.Http" Version="2.2.2" />
     <PackageReference Include="Microsoft.AspNetCore.Http.Extensions" Version="2.2.0" />
     <PackageReference Include="Microsoft.AspNetCore.Routing" Version="2.2.2" />
-    <PackageReference Include="Microsoft.AspNetCore.TestHost" Version="6.0.0" />
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <PackageReference Include="System.Diagnostics.DiagnosticSource" Version="9.0.0" />
     <!-- Deprecated -->
     <PackageReference Include="Microsoft.AspNetCore.Hosting" Version="2.2.7" />
     <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
-    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.6.2" />
-    <PackageReference Include="NUnit" Version="3.13.3" />
-    <PackageReference Include="NUnit3TestAdapter" Version="4.5.0" PrivateAssets="all" />
   </ItemGroup>
 </Project>
