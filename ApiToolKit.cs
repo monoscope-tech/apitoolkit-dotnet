@@ -195,17 +195,6 @@ namespace ApiToolkit.Net
     {
       try
       {
-        string RedactHeader(string header, List<string?> headerVal)
-        {
-          var redactHeaders = config.RedactHeaders != null
-              ? config.RedactHeaders
-              : new List<string>() { "Authorization", "X-Api-Key", "Cookie" };
-
-          return redactHeaders.Contains(header.ToLower())
-              ? "[CLIENT_REDACTED]"
-              : string.Join(",", headerVal);
-        }
-
         span.SetTag("net.host.name", host);
         span.SetTag("apitoolkit.msg_id", msgId);
         span.SetTag("http.route", urlPath);
@@ -222,14 +211,14 @@ namespace ApiToolkit.Net
         span.SetTag("apitoolkit.service_version", config.ServiceVersion);
         span.SetTag("apitoolkit.tags", JsonConvert.SerializeObject(config.Tags ?? new List<string>()));
 
-        foreach (var header in reqHeaders)
+        foreach (var header in RedactHeaders(reqHeaders, config.RedactHeaders))
         {
-          span.SetTag($"http.request.header.{header.Key}", RedactHeader(header.Key, header.Value));
+          span.SetTag($"http.request.header.{header.Key}", string.Join(",", header.Value));
         }
 
-        foreach (var header in respHeaders)
+        foreach (var header in RedactHeaders(respHeaders, config.RedactHeaders))
         {
-          span.SetTag($"http.response.header.{header.Key}", RedactHeader(header.Key, header.Value));
+          span.SetTag($"http.response.header.{header.Key}", string.Join(",", header.Value));
         }
       }
       catch (Exception ex)
@@ -242,7 +231,7 @@ namespace ApiToolkit.Net
       }
     }
 
-    private static ATError BuildError(Exception error)
+    internal static ATError BuildError(Exception error)
     {
       // Create an instance of ATError
       var atError = new ATError
@@ -270,27 +259,24 @@ namespace ApiToolkit.Net
       var data = System.Text.Encoding.UTF8.GetBytes(dataStr);
       if (jsonPaths is null || jsonPaths.Count == 0 || !data.Any()) return data;
 
-      try
+      JToken json;
+      try { json = JToken.Parse(dataStr); }
+      catch (Exception) { return data; }
+      foreach (var jPath in jsonPaths)
       {
-        JObject jsonObject = JObject.Parse(System.Text.Encoding.UTF8.GetString(data));
-        (jsonPaths ?? new List<string>()).ForEach(jPath => jsonObject.SelectTokens(jPath).ToList().ForEach(token => token.Replace("[CLIENT_REDACTED]")));
-        return System.Text.Encoding.UTF8.GetBytes(jsonObject.ToString());
+        try { json.SelectTokens(jPath).ToList().ForEach(token => token.Replace("[CLIENT_REDACTED]")); }
+        catch (Exception) { } // an invalid path must not skip the remaining ones
       }
-      catch (Exception)
-      {
-        return data;
-      }
+      return System.Text.Encoding.UTF8.GetBytes(json.ToString());
     }
 
+    // Always redacted, in addition to Config.RedactHeaders
+    public static readonly string[] DefaultRedactHeaders = ["authorization", "cookie", "set-cookie", "proxy-authorization", "x-api-key"];
 
     public static Dictionary<string, List<string>> RedactHeaders(Dictionary<string, List<string>> headers, List<string> redactList)
     {
-      redactList = (redactList ?? new List<string>()).Select(s => s.ToLower()).ToList();
-      return headers
-          .ToDictionary(
-              kvp => redactList.Contains(kvp.Key.ToLower()) ? kvp.Key : kvp.Key,
-              kvp => redactList.Contains(kvp.Key.ToLower()) ? new List<string> { "[CLIENT_REDACTED]" } : kvp.Value
-          );
+      var redact = new HashSet<string>(DefaultRedactHeaders.Concat(redactList ?? []), StringComparer.OrdinalIgnoreCase);
+      return headers.ToDictionary(kvp => kvp.Key, kvp => redact.Contains(kvp.Key) ? ["[CLIENT_REDACTED]"] : kvp.Value);
     }
   }
 
@@ -370,8 +356,6 @@ namespace ApiToolkit.Net
     {
 
       using var span = RegisteredActivity.StartActivity("apitoolkit-http-span");
-      var Method = request.Method;
-      var RequestUri = request.RequestUri;
       var reqHeaders = request.Headers.ToDictionary(h => h.Key, h => h.Value.ToList());
       var reqBody = "";
       if (request != null && request.Content != null)
@@ -380,13 +364,33 @@ namespace ApiToolkit.Net
       }
 
 
-      var response = await base.SendAsync(request, cancellationToken);
-
+      HttpResponseMessage response = null;
+      var errors = new List<ATError>();
       try
       {
-        var StatusCode = response.StatusCode;
-        var respHeaders = response.Headers.ToDictionary(h => h.Key, h => h.Value.ToList());
-        var respBody = await response.Content.ReadAsStringAsync();
+        return response = await base.SendAsync(request, cancellationToken);
+      }
+      catch (Exception ex)
+      {
+        errors.Add(Client.BuildError(ex));
+        span?.SetStatus(ActivityStatusCode.Error, ex.Message);
+        throw;
+      }
+      finally
+      {
+        // Recorded on failures too, so the span keeps the request details
+        await RecordSpan(span, request, reqHeaders, reqBody, response, errors);
+      }
+    }
+
+    private async Task RecordSpan(Activity span, HttpRequestMessage request, Dictionary<string, List<string>> reqHeaders, string reqBody, HttpResponseMessage response, List<ATError> errors)
+    {
+      if (span == null) return;
+      var RequestUri = request.RequestUri;
+      try
+      {
+        var respHeaders = response?.Headers.ToDictionary(h => h.Key, h => h.Value.ToList()) ?? new();
+        var respBody = response == null ? "" : await response.Content.ReadAsStringAsync();
         var queryDictCol = ParseQueryString(RequestUri?.Query ?? "");
 
         var queryDict = new Dictionary<string, string>();
@@ -402,29 +406,24 @@ namespace ApiToolkit.Net
         Client.SetAttributes(
           span,
           RequestUri?.Host ?? "",
-          (int)StatusCode,
+          (int)(response?.StatusCode ?? 0),
           queryDict,
           ParsePathPattern(_options.PathWildCard ?? RequestUri?.AbsolutePath ?? "", RequestUri?.AbsolutePath ?? ""),
           reqHeaders,
           respHeaders,
-          Method.ToString(),
+          request.Method.ToString(),
           RequestUri?.PathAndQuery ?? "",
           m_id,
           _options.PathWildCard ?? RequestUri?.AbsolutePath ?? "",
           reqBody,
           respBody,
-          [],
+          errors,
           _options,
           "DotNetOutgoing",
            _msg_id ?? ""
           );
-        return response;
       }
-      catch (Exception)
-      {
-        return response;
-      }
-
+      catch (Exception) { }
     }
     static Dictionary<string, string?> ParsePathPattern(string pattern, string url)
     {

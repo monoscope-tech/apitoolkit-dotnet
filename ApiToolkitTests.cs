@@ -61,6 +61,10 @@ public class RedactTests
 
     JObject resultObject = JObject.Parse(Encoding.UTF8.GetString(result));
     Assert.IsTrue(JToken.DeepEquals(expectedObject, resultObject));
+
+    // Top-level arrays and a malformed path must not skip redaction of the rest
+    var arr = Client.RedactFields("[{\"password\":\"hunter2\"}]", new List<string> { "$[*].password", "$[" });
+    Assert.That(Encoding.UTF8.GetString(arr), Does.Not.Contain("hunter2"));
   }
 
   [Test]
@@ -85,80 +89,62 @@ public class RedactTests
     var actual = Client.RedactHeaders(headers, redactList);
     Assert.That(actual, Is.EqualTo(expected));
 
-    // Test failure case
-    redactList = null;
-    expected = headers;
-    actual = Client.RedactHeaders(headers, redactList);
-    Assert.That(actual, Is.EqualTo(expected));
+    // Sensitive headers are redacted even with no redact list
+    actual = Client.RedactHeaders(headers, null);
+    Assert.That(actual["Authorization"], Is.EqualTo(new List<string> { "[CLIENT_REDACTED]" }));
+    Assert.That(actual["X-Forwarded-For"], Is.EqualTo(new List<string> { "127.0.0.1" }));
+  }
+
+  [TestCase(null)]
+  [TestCase("X-Secret")]
+  public void TestSetAttributesRedactsHeaders(string userHeader)
+  {
+    using var span = new Activity("test").Start();
+    var reqHeaders = new Dictionary<string, List<string>>
+    {
+      { "Authorization", new() { "Bearer abc" } }, { "cookie", new() { "sid=1" } },
+      { "Proxy-Authorization", new() { "Basic x" } }, { "X-Secret", new() { "s3cret" } }, { "Accept", new() { "*/*" } }
+    };
+    var respHeaders = new Dictionary<string, List<string>> { { "Set-Cookie", new() { "sid=2" } } };
+    var config = new Config { RedactHeaders = userHeader == null ? null : new List<string> { userHeader } };
+    Client.SetAttributes(span, "example.com", 200, new(), new(), reqHeaders, respHeaders, "GET", "/", "id", "/", "", "", new(), config, "test");
+
+    foreach (var h in new[] { "request.header.Authorization", "request.header.cookie", "request.header.Proxy-Authorization", "response.header.Set-Cookie" })
+      Assert.That(span.GetTagItem($"http.{h}"), Is.EqualTo("[CLIENT_REDACTED]"), h);
+    Assert.That(span.GetTagItem("http.request.header.X-Secret"), Is.EqualTo(userHeader == null ? "s3cret" : "[CLIENT_REDACTED]"));
+    Assert.That(span.GetTagItem("http.request.header.Accept"), Is.EqualTo("*/*"));
+  }
+
+  class ThrowingHandler : HttpMessageHandler
+  {
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage r, CancellationToken c) => throw new HttpRequestException("connection refused");
   }
 
   [Test]
-  public void TestBuildPayload()
+  public async Task TestObservingHandlerRecordsFailedRequests()
   {
-    // Arrange
-    var sdkType = "test-sdk";
-    // Create a new HttpContext with custom request headers and query parameters
-    var req = new DefaultHttpContext().Request;
-    req.Method = "POST";
-    req.Host = new HostString("example.com");
-    req.Path = "/path/to/resource";
-    req.Headers.Add("Authorization", "Value");
-    req.Query = new QueryCollection(new Dictionary<string, StringValues>
-      {
-          { "param1", "value1" },
-          { "param2", "value2" }
-      });
-
-    var statusCode = 200;
-    var reqBody = Encoding.UTF8.GetBytes("{\"foo\":\"bar\"}");
-    var respBody = Encoding.UTF8.GetBytes("{\"baz\":42}");
-    var respHeaders = new Dictionary<string, List<string>>
-      {
-          { "Content-Type", new List<string> { "application/json" } }
-      };
-    var pathParams = new Dictionary<string, string>
-      {
-          { "id", "123" }
-      };
-    var urlPath = "/path/to/resource/{id}";
-    var config = new Config
+    Activity captured = null;
+    using var listener = new ActivityListener
     {
-      RedactHeaders = new List<string> { "Authorization" },
-      RedactRequestBody = new List<string> { "$.foo" },
-      Debug = true,
-      VerboseDebug = true
+      ShouldListenTo = s => s.Name == "APItoolkit.HTTPInstrumentation",
+      Sample = (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.AllDataAndRecorded,
+      ActivityStopped = a => captured = a
     };
+    ActivitySource.AddActivityListener(listener);
+    using var http = new HttpClient(new ObservingHandler(new DefaultHttpContext()) { InnerHandler = new ThrowingHandler() });
+    var req = new HttpRequestMessage(HttpMethod.Post, "http://api.example.com/users?x=1") { Content = new StringContent("{\"a\":1}") };
+    req.Headers.Add("Authorization", "Bearer abc");
 
-    Stopwatch stopwatch = new Stopwatch();
-    stopwatch.Start();
+    Assert.ThrowsAsync<HttpRequestException>(() => http.SendAsync(req));
 
-
-    // Assert
-    //   Assert.AreEqual(req.Host.Host, payload.Host);
-    //   Assert.AreEqual(req.Method, payload.Method);
-    //   Assert.AreEqual(new Dictionary<string, string>
-    // {
-    //     { "id", "123" },
-    // }, payload.PathParams);
-    //   Assert.AreEqual(1, payload.ProtoMajor);
-    //   Assert.AreEqual(1, payload.ProtoMinor);
-    //   Assert.AreEqual(new Dictionary<string, List<string>>
-    // {
-    //     { "param1", new List<string> { "value1" } },
-    //     { "param2", new List<string> { "value2" } }
-    // }, payload.QueryParams);
-    //   Assert.AreEqual(req.Path + req.QueryString, payload.RawUrl);
-    //   Assert.AreEqual(req.Headers["Referer"].ToString(), payload.Referer);
-    //   Assert.AreEqual("{\n  \"foo\": \"[CLIENT_REDACTED]\"\n}", Encoding.UTF8.GetString(payload.RequestBody));
-    //   Assert.AreEqual("[CLIENT_REDACTED]", payload.RequestHeaders["Authorization"][0]);
-    //   Assert.AreEqual("{\"baz\":42}", Encoding.UTF8.GetString(payload.ResponseBody));
-    //   Assert.AreEqual("application/json", payload.ResponseHeaders["Content-Type"][0]);
-    //   Assert.AreEqual(sdkType, payload.SdkType);
-    //   Assert.AreEqual(statusCode, payload.StatusCode);
-    //   Assert.AreEqual("POST", payload.Method);
-    //   Assert.GreaterOrEqual(DateTime.UtcNow, payload.Timestamp);
-    //   Assert.AreEqual(urlPath, payload.UrlPath);
-    //   Console.WriteLine($"APIToolkit: {JsonConvert.SerializeObject(payload)}");
+    Assert.That(captured, Is.Not.Null);
+    Assert.That(captured.GetTagItem("http.request.method"), Is.EqualTo("POST"));
+    Assert.That(captured.GetTagItem("net.host.name"), Is.EqualTo("api.example.com"));
+    Assert.That(captured.GetTagItem("http.route"), Is.EqualTo("/users"));
+    Assert.That(captured.GetTagItem("http.request.body"), Is.EqualTo(Convert.ToBase64String(Encoding.UTF8.GetBytes("{\"a\":1}"))));
+    Assert.That(captured.GetTagItem("http.request.header.Authorization"), Is.EqualTo("[CLIENT_REDACTED]"));
+    Assert.That((string)captured.GetTagItem("apitoolkit.errors"), Does.Contain("connection refused"));
+    Assert.That(captured.Status, Is.EqualTo(ActivityStatusCode.Error));
   }
 
   // [Test]
